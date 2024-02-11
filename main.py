@@ -48,47 +48,44 @@ def get_loader(is_train: bool, batch_size: int, shuffle: bool, transform: transf
 
 
 class Net(torch.nn.Module):
-    bn5_2d: torch.nn.BatchNorm2d
-
-    bn6_1d: torch.nn.BatchNorm1d
-    bn7_1d: torch.nn.BatchNorm1d
+    bn5_1d: torch.nn.BatchNorm1d
 
     def __init__(self):
         super().__init__()
 
-        self.pool = torch.nn.MaxPool2d(2, 1)
+        self.pool = torch.nn.MaxPool2d(2, 2)
         self.relu = torch.nn.ReLU(inplace=True)
 
         self.conv1 = torch.nn.Conv2d(3, 6, kernel_size=2, padding=1)
         self.bn1 = torch.nn.BatchNorm2d(self.conv1.out_channels)
 
-        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 12, kernel_size=3, padding=1)
+        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 12, kernel_size=2, padding=1)
         self.bn2 = torch.nn.BatchNorm2d(self.conv2.out_channels)
 
-        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 24, kernel_size=3, padding=1)
+        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 24, kernel_size=2, padding=1)
         self.bn3 = torch.nn.BatchNorm2d(self.conv3.out_channels)
 
-        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 36, kernel_size=2, padding=1)
+        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 36, kernel_size=3, padding=1)
         self.bn4 = torch.nn.BatchNorm2d(self.conv4.out_channels)
 
-        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 48, kernel_size=2, padding=1)
+        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 48, kernel_size=3, padding=1)
         self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
 
         # TODO: Calculate in features.
-        self.fc1 = torch.nn.Linear(49152, 1024)
-        self.bn6_1d = torch.nn.BatchNorm1d(self.fc1.out_features)
-        self.fc2 = torch.nn.Linear(self.fc1.out_features, 2048)
-        self.bn7_1d = torch.nn.BatchNorm1d(self.fc2.out_features)
-        self.fc3 = torch.nn.Linear(self.fc2.out_features, 10)
+        self.fc1 = torch.nn.Linear(192, 64)
+        self.bn5_1d = torch.nn.BatchNorm1d(self.fc1.out_features)
+        self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
+        x = self.pool(x)
 
         x = self.conv2(x)
         x = self.bn2(x)
         x = self.relu(x)
+        x = self.pool(x)
 
         x = self.conv3(x)
         x = self.bn3(x)
@@ -98,7 +95,6 @@ class Net(torch.nn.Module):
         x = self.conv4(x)
         x = self.bn4(x)
         x = self.relu(x)
-        x = self.pool(x)
 
         x = self.conv5(x)
         x = self.bn5(x)
@@ -108,14 +104,10 @@ class Net(torch.nn.Module):
         x = torch.flatten(x, 1)
 
         x = self.fc1(x)
-        x = self.bn6_1d(x)
+        x = self.bn5_1d(x)
         x = self.relu(x)
 
         x = self.fc2(x)
-        x = self.bn7_1d(x)
-        x = self.relu(x)
-
-        x = self.fc3(x)
 
         return x
 
@@ -123,7 +115,7 @@ class Net(torch.nn.Module):
 train_batch_size = 10
 test_batch_size = 4
 
-temp_transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(0.5, 0.5)])
+temp_transform = transforms.Compose([transforms.ToTensor()])
 
 _, temp_train_data_loader = get_loader(True, train_batch_size, shuffle=True, transform=temp_transform)
 _, temp_test_data_loader = get_loader(False, test_batch_size, shuffle=False, transform=temp_transform)
@@ -173,6 +165,7 @@ net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = optim.Adam(net.parameters(), lr=lr)
+sheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=gamma)
 
 print('LEARNING')
 writer = SummaryWriter()
@@ -227,6 +220,9 @@ for epoch in range(num_epochs):
           f'Train Accuracy: {train_accuracy:.2f}%, '
           f'Val Loss: {val_loss / len(val_loader):.4f}, '
           f'Val Accuracy: {val_accuracy:.2f}%')
+
+    sheduler.step()
+
 writer.flush()
 
 print('Finished Training')
