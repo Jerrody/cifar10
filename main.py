@@ -72,7 +72,7 @@ class Net(torch.nn.Module):
         self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
 
         # TODO: Calculate in features.
-        self.fc1 = torch.nn.Linear(192, 64)
+        self.fc1 = torch.nn.Linear(768, 256)
         self.bn5_1d = torch.nn.BatchNorm1d(self.fc1.out_features)
         self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
 
@@ -80,7 +80,6 @@ class Net(torch.nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        x = self.pool(x)
 
         x = self.conv2(x)
         x = self.bn2(x)
@@ -95,11 +94,11 @@ class Net(torch.nn.Module):
         x = self.conv4(x)
         x = self.bn4(x)
         x = self.relu(x)
+        x = self.pool(x)
 
         x = self.conv5(x)
         x = self.bn5(x)
         x = self.relu(x)
-        x = self.pool(x)
 
         x = torch.flatten(x, 1)
 
