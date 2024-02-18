@@ -47,6 +47,33 @@ def get_loader(is_train: bool, batch_size: int, shuffle: bool, transform: transf
     return dataset, loader
 
 
+class AdaptiveDropout(torch.nn.Module):
+    def __init__(self, drop_prob=0.5, adaptivity_control=0.5):
+        super(AdaptiveDropout, self).__init__()
+        self.drop_prob = drop_prob
+        self.adaptivity_control = adaptivity_control
+
+    def forward(self, x):
+        if self.training:
+            active_prob = x.abs().mean(dim=tuple(range(1, x.dim())), keepdim=True)
+            dropout_prob = torch.clamp(self.drop_prob + self.adaptivity_control * (active_prob - self.drop_prob), 0, 1)
+            mask = torch.bernoulli(1.0 - dropout_prob).to(x.device)
+            x = x * mask / (1.0 - dropout_prob + 1e-6)
+        return x
+
+
+class HomoeostaticRegulation(torch.nn.Module):
+    def __init__(self, target_activity=0.1):
+        super(HomoeostaticRegulation, self).__init__()
+        self.target_activity = target_activity
+
+    def forward(self, x):
+        current_activity = x.abs().mean()
+        adjustment_factor = self.target_activity / current_activity
+        x = x * adjustment_factor
+        return x
+
+
 class Net(torch.nn.Module):
     bn5_1d: torch.nn.BatchNorm1d
 
@@ -56,54 +83,68 @@ class Net(torch.nn.Module):
         self.pool = torch.nn.MaxPool2d(2, 2)
         self.relu = torch.nn.ReLU(inplace=True)
 
-        self.conv1 = torch.nn.Conv2d(3, 12, kernel_size=2, padding=1)
+        self.conv1 = torch.nn.Conv2d(3, 24, kernel_size=2, padding=1)
         self.bn1 = torch.nn.BatchNorm2d(self.conv1.out_channels)
 
-        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 24, kernel_size=2, padding=1)
+        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 24 * 2, kernel_size=2, padding=1)
         self.bn2 = torch.nn.BatchNorm2d(self.conv2.out_channels)
 
-        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 36, kernel_size=2, padding=1)
+        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 24 * 3, kernel_size=2, padding=1)
         self.bn3 = torch.nn.BatchNorm2d(self.conv3.out_channels)
 
-        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 48, kernel_size=3, padding=1)
+        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 24 * 4, kernel_size=3, padding=1)
         self.bn4 = torch.nn.BatchNorm2d(self.conv4.out_channels)
 
-        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 60, kernel_size=3, padding=1)
+        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 24 * 5, kernel_size=3, padding=1)
         self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
 
         # TODO: Calculate in features.
-        self.fc1 = torch.nn.Linear(4860, 1024)
+        self.fc1 = torch.nn.Linear(9720, 1024)
         self.bn5_1d = torch.nn.BatchNorm1d(self.fc1.out_features)
+        self.adaptive_dropout = AdaptiveDropout(drop_prob=0.35)
+        self.homeostatic_regulation = HomoeostaticRegulation(target_activity=0.3)
         self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
+        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        # x = self.adaptive_dropout(x)
         x = self.pool(x)
 
         x = self.conv2(x)
         x = self.bn2(x)
+        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        x = self.adaptive_dropout(x)
 
         x = self.conv3(x)
         x = self.bn3(x)
+        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        # x = self.adaptive_dropout(x)
 
         x = self.conv4(x)
         x = self.bn4(x)
+        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        x = self.adaptive_dropout(x)
 
         x = self.conv5(x)
         x = self.bn5(x)
+        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        # x = self.adaptive_dropout(x)
         x = self.pool(x)
 
         x = torch.flatten(x, 1)
 
         x = self.fc1(x)
         x = self.bn5_1d(x)
+        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        x = self.adaptive_dropout(x)
 
         x = self.fc2(x)
 
@@ -124,7 +165,7 @@ print(f"train_mean: {train_mean}, train_std: {train_std}")
 test_mean, test_std = get_normalized_data_transform(temp_test_data_loader)
 print(f"test_mean: {test_mean}, test_mean: {test_std}")
 
-transform_ops = [transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET)]
+transform_ops = [transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10)]
 
 train_transform = transforms.Compose(
     transform_ops + [transforms.ToTensor(), transforms.Normalize(train_mean, train_std)])
@@ -150,15 +191,16 @@ images, labels = next(dataiter)
 imshow(torchvision.utils.make_grid(images))
 print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
-lr = 0.001
+lr = 1e-3
+weight_decay = 1e-3
 gamma = 0.6
-num_epochs = 50
+num_epochs = 20
 
 net = Net()
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
-optimizer = optim.Adam(net.parameters(), lr=lr)
+optimizer = optim.AdamW(net.parameters(), lr=lr)
 sheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
 
 print('LEARNING')
