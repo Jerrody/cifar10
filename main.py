@@ -48,18 +48,37 @@ def get_loader(is_train: bool, batch_size: int, shuffle: bool, transform: transf
 
 
 class AdaptiveDropout(torch.nn.Module):
-    def __init__(self, drop_prob=0.5, adaptivity_control=0.5):
+    current_epoch: int = 0
+
+    def __init__(self, total_epochs, initial_drop_prob=1e-6, final_drop_prob=0.8, adaptivity_control_start=0.5,
+                 adaptivity_control_end=0.1):
         super(AdaptiveDropout, self).__init__()
-        self.drop_prob = drop_prob
-        self.adaptivity_control = adaptivity_control
+        self.initial_drop_prob = initial_drop_prob
+        self.final_drop_prob = final_drop_prob
+        self.adaptivity_control_start = adaptivity_control_start
+        self.adaptivity_control_end = adaptivity_control_end
+        self.total_epochs = total_epochs
+        self.drop_prob = initial_drop_prob
+        self.adaptivity_control = adaptivity_control_start
 
     def forward(self, x):
+        self.update_parameters(self.current_epoch)
+
         if self.training:
             active_prob = x.abs().mean(dim=tuple(range(1, x.dim())), keepdim=True)
             dropout_prob = torch.clamp(self.drop_prob + self.adaptivity_control * (active_prob - self.drop_prob), 0, 1)
             mask = torch.bernoulli(1.0 - dropout_prob).to(x.device)
             x = x * mask / (1.0 - dropout_prob + 1e-6)
         return x
+
+    def update_parameters(self, current_epoch):
+        epoch_ratio = current_epoch / self.total_epochs
+        self.drop_prob = (self.final_drop_prob - self.initial_drop_prob) * epoch_ratio + self.initial_drop_prob
+        self.adaptivity_control = ((self.adaptivity_control_end - self.adaptivity_control_start) * epoch_ratio
+                                   + self.adaptivity_control_start)
+
+    def step(self):
+        self.current_epoch += 1
 
 
 class HomoeostaticRegulation(torch.nn.Module):
@@ -101,54 +120,57 @@ class Net(torch.nn.Module):
         # TODO: Calculate in features.
         self.fc1 = torch.nn.Linear(9720, 1024)
         self.bn5_1d = torch.nn.BatchNorm1d(self.fc1.out_features)
-        self.adaptive_dropout = AdaptiveDropout(drop_prob=0.35)
-        self.homeostatic_regulation = HomoeostaticRegulation(target_activity=0.3)
+        self.adaptive_dropout = AdaptiveDropout(num_epochs, 1e-6, 0.3)
+        self.homeostatic_regulation = HomoeostaticRegulation(0.0001)
         self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
-        x = self.homeostatic_regulation(x)
         x = self.relu(x)
-        # x = self.adaptive_dropout(x)
+        x = self.homeostatic_regulation(x)
+        x = self.adaptive_dropout(x)
         x = self.pool(x)
 
         x = self.conv2(x)
         x = self.bn2(x)
-        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        x = self.homeostatic_regulation(x)
         x = self.adaptive_dropout(x)
 
         x = self.conv3(x)
         x = self.bn3(x)
-        x = self.homeostatic_regulation(x)
         x = self.relu(x)
-        # x = self.adaptive_dropout(x)
+        x = self.homeostatic_regulation(x)
+        x = self.adaptive_dropout(x)
 
         x = self.conv4(x)
         x = self.bn4(x)
-        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        x = self.homeostatic_regulation(x)
         x = self.adaptive_dropout(x)
 
         x = self.conv5(x)
         x = self.bn5(x)
-        x = self.homeostatic_regulation(x)
         x = self.relu(x)
-        # x = self.adaptive_dropout(x)
+        x = self.homeostatic_regulation(x)
+        x = self.adaptive_dropout(x)
         x = self.pool(x)
 
         x = torch.flatten(x, 1)
 
         x = self.fc1(x)
         x = self.bn5_1d(x)
-        x = self.homeostatic_regulation(x)
         x = self.relu(x)
+        x = self.homeostatic_regulation(x)
         x = self.adaptive_dropout(x)
 
         x = self.fc2(x)
 
         return x
+
+    def step(self):
+        self.adaptive_dropout.step()
 
 
 train_batch_size = 25
@@ -165,11 +187,21 @@ print(f"train_mean: {train_mean}, train_std: {train_std}")
 test_mean, test_std = get_normalized_data_transform(temp_test_data_loader)
 print(f"test_mean: {test_mean}, test_mean: {test_std}")
 
-transform_ops = [transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10)]
+train_transform = transforms.Compose([
+    transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10),
+    transforms.ToTensor(),
+    transforms.Normalize(train_mean, train_std)
+])
 
-train_transform = transforms.Compose(
-    transform_ops + [transforms.ToTensor(), transforms.Normalize(train_mean, train_std)])
-test_transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(test_mean, test_std)])
+val_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(train_mean, train_std)
+])
+
+test_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(test_mean, test_std)
+])
 
 train_dataset, _ = get_loader(True, train_batch_size, shuffle=True, transform=train_transform)
 dataset_len = len(train_dataset)
@@ -177,6 +209,9 @@ train_size = int(dataset_len * 0.8)
 val_size = dataset_len - train_size
 
 train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
+
+train_dataset.dataset.transform = train_transform
+val_dataset.dataset.transform = val_transform
 
 train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=train_batch_size, shuffle=True)
 val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=test_batch_size, shuffle=False)
@@ -191,8 +226,8 @@ images, labels = next(dataiter)
 imshow(torchvision.utils.make_grid(images))
 print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
-lr = 1e-3
-weight_decay = 1e-3
+lr = 0.01
+weight_decay = 1
 gamma = 0.6
 num_epochs = 20
 
@@ -201,7 +236,7 @@ net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = optim.AdamW(net.parameters(), lr=lr)
-sheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2, verbose=True)
 
 print('LEARNING')
 writer = SummaryWriter()
@@ -257,7 +292,8 @@ for epoch in range(num_epochs):
           f'Val Loss: {val_loss / len(val_loader):.4f}, '
           f'Val Accuracy: {val_accuracy:.2f}%')
 
-    sheduler.step(loss)
+    scheduler.step(val_loss)
+    net.step()
 
 writer.flush()
 
@@ -279,3 +315,9 @@ with torch.no_grad():
 
 test_accuracy = 100 * correct / total
 print(f'Test accuracy: {test_accuracy:.2f}%')
+
+dataiter = iter(test_loader)
+images, labels = next(dataiter)
+
+imshow(torchvision.utils.make_grid(images))
+print('GroundTruth: ', ' '.join(f'{classes[labels[j]]:5s}' for j in range(4)))
