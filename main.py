@@ -2,9 +2,9 @@
 
 import numpy as np
 import torch
+import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-import torch.optim as optim
 from matplotlib import pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
@@ -17,8 +17,9 @@ print(f"Found device for fitting: {device}")
 
 def imshow(img):
     np_img = img.numpy()
-    np_img = np_img / np.max(np_img)
-    plt.imshow(np.transpose(np_img, (1, 2, 0)))
+    np_img = (np_img - np.min(np_img)) / (np.max(np_img) - np.min(np_img))
+    np_img = np.transpose(np_img, (1, 2, 0))
+    plt.imshow(np_img)
     plt.show()
 
 
@@ -68,7 +69,7 @@ class AdaptiveDropout(torch.nn.Module):
             active_prob = x.abs().mean(dim=tuple(range(1, x.dim())), keepdim=True)
             dropout_prob = torch.clamp(self.drop_prob + self.adaptivity_control * (active_prob - self.drop_prob), 0, 1)
             mask = torch.bernoulli(1.0 - dropout_prob).to(x.device)
-            x = x * mask / (1.0 - dropout_prob + 1e-6)
+            x = x * mask / (1.0 - dropout_prob)
         return x
 
     def update_parameters(self, current_epoch):
@@ -81,100 +82,171 @@ class AdaptiveDropout(torch.nn.Module):
         self.current_epoch += 1
 
 
+class AdaptiveDropout2D(torch.nn.Module):
+    def __init__(self, total_epochs, initial_drop_prob=1e-6, final_drop_prob=0.8, adaptivity_control_start=0.5,
+                 adaptivity_control_end=0.1):
+        super(AdaptiveDropout2D, self).__init__()
+        self.initial_drop_prob = max(0.0, min(initial_drop_prob, 1.0))
+        self.final_drop_prob = max(0.0, min(final_drop_prob, 1.0))
+        self.adaptivity_control_start = adaptivity_control_start
+        self.adaptivity_control_end = adaptivity_control_end
+        self.total_epochs = total_epochs
+        self.drop_prob = self.initial_drop_prob
+        self.adaptivity_control = adaptivity_control_start
+        self.current_epoch = 0
+
+    def forward(self, x):
+        self.update_parameters(self.current_epoch)
+
+        if self.training:
+            active_prob = x.abs().mean(dim=(2, 3), keepdim=True) if x.dim() > 3 else x.abs().mean(
+                dim=tuple(range(1, x.dim())), keepdim=True)
+
+            dropout_prob = torch.clamp(self.drop_prob + self.adaptivity_control * (active_prob - self.drop_prob), 0, 1)
+
+            mask_shape = (x.shape[0], x.shape[1], 1, 1) if x.dim() > 3 else (x.shape[0], 1)
+            mask = torch.bernoulli(1.0 - dropout_prob.expand_as(x)).to(x.device)
+
+            x = x * mask / (1.0 - dropout_prob + 1e-6)
+
+        return x
+
+    def update_parameters(self, current_epoch):
+        epoch_ratio = min(max(current_epoch / self.total_epochs, 0), 1)  # Clamp ratio to [0, 1]
+        self.drop_prob = (self.final_drop_prob - self.initial_drop_prob) * epoch_ratio + self.initial_drop_prob
+        self.adaptivity_control = ((self.adaptivity_control_end - self.adaptivity_control_start) * epoch_ratio
+                                   + self.adaptivity_control_start)
+
+    def step(self):
+        self.current_epoch = min(self.current_epoch + 1, self.total_epochs)
+
+
 class HomoeostaticRegulation(torch.nn.Module):
     def __init__(self, target_activity=0.1):
         super(HomoeostaticRegulation, self).__init__()
         self.target_activity = target_activity
 
     def forward(self, x):
-        current_activity = x.abs().mean()
-        adjustment_factor = self.target_activity / current_activity
-        x = x * adjustment_factor
+        if self.training:
+            current_activity = x.abs().mean()
+            adjustment_factor = self.target_activity / current_activity
+            x = x * adjustment_factor
+
         return x
 
 
-class Net(torch.nn.Module):
-    bn5_1d: torch.nn.BatchNorm1d
+class AggregationBlock(torch.nn.Module):
+    def __init__(self, in_channels):
+        super(AggregationBlock, self).__init__()
+        self.conv1 = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
+        self.relu = torch.nn.ReLU(inplace=True)
 
-    def __init__(self):
+    def forward(self, x, y):
+        x = self.conv1(x)
+
+        if x.size()[2:] != y.size()[2:]:
+            y = torch.nn.functional.interpolate(y, size=x.size()[2:], mode='bilinear', align_corners=False)
+
+        return self.relu(x + y)
+
+
+class Net(torch.nn.Module):
+    def __init__(self, input_size=(3, 32, 32)):
         super().__init__()
 
         self.pool = torch.nn.MaxPool2d(2, 2)
         self.relu = torch.nn.ReLU(inplace=True)
 
-        self.conv1 = torch.nn.Conv2d(3, 24, kernel_size=2, padding=1)
+        self.conv1 = torch.nn.Conv2d(3, 36, kernel_size=2)
         self.bn1 = torch.nn.BatchNorm2d(self.conv1.out_channels)
 
-        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 24 * 2, kernel_size=2, padding=1)
+        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 64, kernel_size=2)
         self.bn2 = torch.nn.BatchNorm2d(self.conv2.out_channels)
 
-        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 24 * 3, kernel_size=2, padding=1)
+        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 64, kernel_size=2, stride=1, padding=1)
         self.bn3 = torch.nn.BatchNorm2d(self.conv3.out_channels)
 
-        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 24 * 4, kernel_size=3, padding=1)
+        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 128, kernel_size=2, stride=1, padding=1)
         self.bn4 = torch.nn.BatchNorm2d(self.conv4.out_channels)
 
-        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 24 * 5, kernel_size=3, padding=1)
+        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 128, kernel_size=2, stride=2)
         self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
 
-        # TODO: Calculate in features.
-        self.fc1 = torch.nn.Linear(9720, 1024)
+        self.dropout1 = torch.nn.Dropout2d(p=0.5)
+        self.dropout2 = torch.nn.Dropout(p=0.5)
+        self.dropout3 = torch.nn.Dropout2d(p=0.1)
+
+        self.adaptive_dropout_2d = AdaptiveDropout2D(num_epochs,
+                                                     initial_drop_prob=0.2,
+                                                     final_drop_prob=0.8,
+                                                     adaptivity_control_start=0.2,
+                                                     adaptivity_control_end=0.7)
+
+        self.block_1 = AggregationBlock(in_channels=64)
+        self.block_2 = AggregationBlock(in_channels=128)
+
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *input_size)
+            x = self.forward_conv(dummy_input)
+            out_features = x.view(x.size(0), -1).size(1)
+
+        self.fc1 = torch.nn.Linear(out_features, 128)
         self.bn5_1d = torch.nn.BatchNorm1d(self.fc1.out_features)
-        self.adaptive_dropout = AdaptiveDropout(num_epochs, 1e-6, 0.3)
-        self.homeostatic_regulation = HomoeostaticRegulation(0.0001)
         self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
 
-    def forward(self, x):
+    def forward_conv(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        x = self.homeostatic_regulation(x)
-        x = self.adaptive_dropout(x)
         x = self.pool(x)
 
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-        x = self.homeostatic_regulation(x)
-        x = self.adaptive_dropout(x)
+        x1 = self.conv2(x)
+        x1 = self.bn2(x1)
+        x1 = self.relu(x1)
 
-        x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.relu(x)
-        x = self.homeostatic_regulation(x)
-        x = self.adaptive_dropout(x)
+        x2 = self.conv3(x1)
+        x2 = self.bn3(x2)
+        x2 = self.relu(x2)
 
-        x = self.conv4(x)
-        x = self.bn4(x)
-        x = self.relu(x)
-        x = self.homeostatic_regulation(x)
-        x = self.adaptive_dropout(x)
+        x = self.block_1.forward(x1, x2)
+        x = self.dropout1(x)
 
-        x = self.conv5(x)
-        x = self.bn5(x)
-        x = self.relu(x)
-        x = self.homeostatic_regulation(x)
-        x = self.adaptive_dropout(x)
-        x = self.pool(x)
+        x3 = self.conv4(x)
+        x3 = self.bn4(x3)
+        x3 = self.relu(x3)
+        x3 = self.pool(x3)
+
+        x4 = self.conv5(x3)
+        x4 = self.bn5(x4)
+        x4 = self.relu(x4)
+        x4 = self.pool(x4)
+
+        x = self.block_2.forward(x3, x4)
+        x = self.dropout1(x)
+
+        return x
+
+    def forward(self, x):
+        x = self.forward_conv(x)
 
         x = torch.flatten(x, 1)
 
         x = self.fc1(x)
         x = self.bn5_1d(x)
         x = self.relu(x)
-        x = self.homeostatic_regulation(x)
-        x = self.adaptive_dropout(x)
+        x = self.dropout2(x)
 
         x = self.fc2(x)
 
         return x
 
     def step(self):
-        self.adaptive_dropout.step()
+        self.adaptive_dropout_2d.step()
+        # self.adaptive_dropout2.step()
 
 
-train_batch_size = 25
-test_batch_size = 6
+train_batch_size = 128
+test_batch_size = 64
 
 temp_transform = transforms.Compose([transforms.ToTensor()])
 
@@ -205,7 +277,7 @@ test_transform = transforms.Compose([
 
 train_dataset, _ = get_loader(True, train_batch_size, shuffle=True, transform=train_transform)
 dataset_len = len(train_dataset)
-train_size = int(dataset_len * 0.8)
+train_size = int(dataset_len * 0.9)
 val_size = dataset_len - train_size
 
 train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
@@ -226,16 +298,18 @@ images, labels = next(dataiter)
 imshow(torchvision.utils.make_grid(images))
 print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
-lr = 0.01
-weight_decay = 1
-gamma = 0.6
+lr = 1e-3
+weight_decay = 1e-2
 num_epochs = 20
+l1_lambda = 0.001
 
 net = Net()
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
-optimizer = optim.AdamW(net.parameters(), lr=lr)
+optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
+l1_norm = sum(p.abs().sum() for p in net.parameters())
+
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2, verbose=True)
 
 print('LEARNING')
