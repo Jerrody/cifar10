@@ -154,36 +154,37 @@ class Net(torch.nn.Module):
     def __init__(self, input_size=(3, 32, 32)):
         super().__init__()
 
-        self.pool = torch.nn.MaxPool2d(2, 2)
+        self.avg_pool = torch.nn.AvgPool2d(2, 1)
+        self.max_pool = torch.nn.MaxPool2d(2, 2)
         self.relu = torch.nn.ReLU(inplace=True)
 
-        self.conv1 = torch.nn.Conv2d(3, 36, kernel_size=2)
+        self.conv1 = torch.nn.Conv2d(3, 64, kernel_size=2)
         self.bn1 = torch.nn.BatchNorm2d(self.conv1.out_channels)
 
-        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 64, kernel_size=2)
+        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 128, kernel_size=2, padding=1)
         self.bn2 = torch.nn.BatchNorm2d(self.conv2.out_channels)
 
-        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 64, kernel_size=2, stride=1, padding=1)
+        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 128, kernel_size=2, padding=1)
         self.bn3 = torch.nn.BatchNorm2d(self.conv3.out_channels)
 
-        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 128, kernel_size=2, stride=1, padding=1)
+        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 256, kernel_size=2, stride=2)
         self.bn4 = torch.nn.BatchNorm2d(self.conv4.out_channels)
 
-        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 128, kernel_size=2, stride=2)
+        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 256, kernel_size=2, stride=1, padding=1)
         self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
 
-        self.dropout1 = torch.nn.Dropout2d(p=0.5)
-        self.dropout2 = torch.nn.Dropout(p=0.5)
+        self.dropout1 = torch.nn.Dropout2d(p=0.8)
+        self.dropout2 = torch.nn.Dropout(p=0.3)
         self.dropout3 = torch.nn.Dropout2d(p=0.1)
 
-        self.adaptive_dropout_2d = AdaptiveDropout2D(num_epochs,
-                                                     initial_drop_prob=0.2,
-                                                     final_drop_prob=0.8,
-                                                     adaptivity_control_start=0.2,
-                                                     adaptivity_control_end=0.7)
+        self.adaptive_dropout_2d = AdaptiveDropout(num_epochs,
+                                                   initial_drop_prob=0.2,
+                                                   final_drop_prob=0.8,
+                                                   adaptivity_control_start=0.2,
+                                                   adaptivity_control_end=0.7)
 
-        self.block_1 = AggregationBlock(in_channels=64)
-        self.block_2 = AggregationBlock(in_channels=128)
+        self.block_1 = AggregationBlock(in_channels=self.conv2.out_channels)
+        self.block_2 = AggregationBlock(in_channels=self.conv4.out_channels)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
@@ -198,31 +199,33 @@ class Net(torch.nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        x = self.pool(x)
+        x = self.max_pool(x)
 
         x1 = self.conv2(x)
         x1 = self.bn2(x1)
         x1 = self.relu(x1)
+        x1 = self.avg_pool(x1)
 
         x2 = self.conv3(x1)
         x2 = self.bn3(x2)
         x2 = self.relu(x2)
+        x2 = self.avg_pool(x2)
 
         x = self.block_1.forward(x1, x2)
-        x = self.dropout1(x)
+        x = self.adaptive_dropout_2d(x)
 
         x3 = self.conv4(x)
         x3 = self.bn4(x3)
         x3 = self.relu(x3)
-        x3 = self.pool(x3)
+        x3 = self.avg_pool(x3)
 
         x4 = self.conv5(x3)
         x4 = self.bn5(x4)
         x4 = self.relu(x4)
-        x4 = self.pool(x4)
+        x4 = self.max_pool(x4)
 
         x = self.block_2.forward(x3, x4)
-        x = self.dropout1(x)
+        # x = self.dropout1(x)
 
         return x
 
@@ -234,7 +237,7 @@ class Net(torch.nn.Module):
         x = self.fc1(x)
         x = self.bn5_1d(x)
         x = self.relu(x)
-        x = self.dropout2(x)
+        # x = self.dropout2(x)
 
         x = self.fc2(x)
 
@@ -299,16 +302,14 @@ imshow(torchvision.utils.make_grid(images))
 print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
 lr = 1e-3
-weight_decay = 1e-2
-num_epochs = 20
-l1_lambda = 0.001
+weight_decay = 1e-1
+num_epochs = 50
 
 net = Net()
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
-l1_norm = sum(p.abs().sum() for p in net.parameters())
 
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2, verbose=True)
 
