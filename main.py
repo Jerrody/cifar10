@@ -139,15 +139,19 @@ class AggregationBlock(torch.nn.Module):
     def __init__(self, in_channels):
         super(AggregationBlock, self).__init__()
         self.conv1 = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
-        self.relu = torch.nn.ReLU(inplace=True)
+        self.relu = torch.nn.ReLU(inplace=False)
+        self.bn = torch.nn.BatchNorm2d(self.conv1.out_channels)
+        self.dropout = torch.nn.Dropout2d(p=0.65)
 
     def forward(self, x, y):
         x = self.conv1(x)
+        x = self.bn(x)
+        x = self.relu(x)
 
         if x.size()[2:] != y.size()[2:]:
             y = torch.nn.functional.interpolate(y, size=x.size()[2:], mode='bilinear', align_corners=False)
 
-        return self.relu(x + y)
+        return self.dropout(x + y)
 
 
 class Net(torch.nn.Module):
@@ -204,27 +208,25 @@ class Net(torch.nn.Module):
         x1 = self.conv2(x)
         x1 = self.bn2(x1)
         x1 = self.relu(x1)
-        x1 = self.avg_pool(x1)
 
         x2 = self.conv3(x1)
         x2 = self.bn3(x2)
         x2 = self.relu(x2)
-        x2 = self.avg_pool(x2)
 
         x = self.block_1.forward(x1, x2)
-        x = self.adaptive_dropout_2d(x)
+        x = self.avg_pool(x)
+        # x = self.adaptive_dropout_2d(x)
 
         x3 = self.conv4(x)
         x3 = self.bn4(x3)
         x3 = self.relu(x3)
-        x3 = self.avg_pool(x3)
 
         x4 = self.conv5(x3)
         x4 = self.bn5(x4)
         x4 = self.relu(x4)
-        x4 = self.max_pool(x4)
 
         x = self.block_2.forward(x3, x4)
+        x = self.avg_pool(x)
         # x = self.dropout1(x)
 
         return x
@@ -303,7 +305,7 @@ print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
 lr = 1e-3
 weight_decay = 1e-1
-num_epochs = 50
+num_epochs = 100
 
 net = Net()
 net.to(device)
@@ -311,7 +313,7 @@ net.to(device)
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2, verbose=True)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.4, patience=2, verbose=True)
 
 print('LEARNING')
 writer = SummaryWriter()
