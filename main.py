@@ -141,7 +141,7 @@ class AggregationBlock(torch.nn.Module):
         self.conv1 = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
         self.relu = torch.nn.ReLU(inplace=False)
         self.bn = torch.nn.BatchNorm2d(self.conv1.out_channels)
-        self.dropout = torch.nn.Dropout2d(p=0.65)
+        self.dropout = torch.nn.Dropout2d(p=0.75)
 
     def forward(self, x, y):
         x = self.conv1(x)
@@ -178,7 +178,7 @@ class Net(torch.nn.Module):
         self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
 
         self.dropout1 = torch.nn.Dropout2d(p=0.8)
-        self.dropout2 = torch.nn.Dropout(p=0.3)
+        self.dropout2 = torch.nn.Dropout(p=0.2)
         self.dropout3 = torch.nn.Dropout2d(p=0.1)
 
         self.adaptive_dropout_2d = AdaptiveDropout(num_epochs,
@@ -203,15 +203,18 @@ class Net(torch.nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
+        x = self.dropout2(x)
         x = self.max_pool(x)
 
         x1 = self.conv2(x)
         x1 = self.bn2(x1)
         x1 = self.relu(x1)
+        x1 = self.dropout3(x1)
 
         x2 = self.conv3(x1)
         x2 = self.bn3(x2)
         x2 = self.relu(x2)
+        x2 = self.dropout3(x2)
 
         x = self.block_1.forward(x1, x2)
         x = self.avg_pool(x)
@@ -220,10 +223,12 @@ class Net(torch.nn.Module):
         x3 = self.conv4(x)
         x3 = self.bn4(x3)
         x3 = self.relu(x3)
+        x3 = self.dropout3(x3)
 
         x4 = self.conv5(x3)
         x4 = self.bn5(x4)
         x4 = self.relu(x4)
+        x4 = self.dropout3(x4)
 
         x = self.block_2.forward(x3, x4)
         x = self.avg_pool(x)
