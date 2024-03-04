@@ -53,18 +53,14 @@ class AggregationBlock(torch.nn.Module):
         super(AggregationBlock, self).__init__()
         self.conv1 = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
         self.relu = torch.nn.ReLU(inplace=False)
-        self.bn = torch.nn.BatchNorm2d(self.conv1.out_channels)
-        self.dropout = torch.nn.Dropout2d(p=0.75)
 
     def forward(self, x, y):
         x = self.conv1(x)
-        x = self.bn(x)
-        x = self.relu(x)
 
         if x.size()[2:] != y.size()[2:]:
             y = torch.nn.functional.interpolate(y, size=x.size()[2:], mode='bilinear', align_corners=False)
 
-        return self.dropout(x + y)
+        return self.relu(x + y)
 
 
 class Net(torch.nn.Module):
@@ -89,7 +85,7 @@ class Net(torch.nn.Module):
         self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 256, kernel_size=2, stride=1, padding=1)
         self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
 
-        self.dropout_2d = torch.nn.Dropout2d(p=0.35)
+        self.dropout_2d = torch.nn.Dropout2d(p=0.38)
 
         self.block_1 = AggregationBlock(in_channels=self.conv2.out_channels)
         self.block_2 = AggregationBlock(in_channels=self.conv4.out_channels)
