@@ -2,6 +2,8 @@
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
@@ -48,101 +50,84 @@ def get_loader(is_train: bool, batch_size: int, shuffle: bool, transform: transf
     return dataset, loader
 
 
-class AggregationBlock(torch.nn.Module):
-    def __init__(self, in_channels):
-        super(AggregationBlock, self).__init__()
-        self.conv1 = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
-        self.relu = torch.nn.ReLU(inplace=False)
+class Block(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, dropout=0.0):
+        super(Block, self).__init__()
+        self.dropout = None
+        if dropout > 0.0:
+            self.dropout = nn.Dropout2d(p=dropout)
+        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-    def forward(self, x, y):
-        x = self.conv1(x)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
 
-        if x.size()[2:] != y.size()[2:]:
-            y = torch.nn.functional.interpolate(y, size=x.size()[2:], mode='bilinear', align_corners=False)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
 
-        return self.relu(x + y)
+        self.projection = None
+        if in_channels != out_channels:
+            self.projection = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        if self.dropout is not None:
+            out = self.dropout(out)
+
+        out = F.relu(self.bn2(self.conv2(out))).clone()
+        if self.dropout is not None:
+            out = self.dropout(out)
+
+        if self.projection is not None:
+            residual = self.projection(x)
+
+        if self.dropout is not None:
+            residual = self.projection(x)
+
+        out += residual
+        out = self.max_pool(out)
+        out = F.relu(out)
+        if self.dropout is not None:
+            out = self.dropout(out)
+
+        return out
 
 
 class Net(torch.nn.Module):
-    def __init__(self, input_size=(3, 32, 32)):
+    def __init__(self,  block_configs: [(int, int)], input_size=(3, 32, 32)):
         super().__init__()
-
-        self.max_pool = torch.nn.MaxPool2d(2, 2)
-        self.relu = torch.nn.ReLU(inplace=True)
-
-        self.conv1 = torch.nn.Conv2d(3, 64, kernel_size=2)
-        self.bn1 = torch.nn.BatchNorm2d(self.conv1.out_channels)
-
-        self.conv2 = torch.nn.Conv2d(self.conv1.out_channels, 128, kernel_size=2, padding=1)
-        self.bn2 = torch.nn.BatchNorm2d(self.conv2.out_channels)
-
-        self.conv3 = torch.nn.Conv2d(self.conv2.out_channels, 128, kernel_size=2, padding=1)
-        self.bn3 = torch.nn.BatchNorm2d(self.conv3.out_channels)
-
-        self.conv4 = torch.nn.Conv2d(self.conv3.out_channels, 256, kernel_size=2, stride=2)
-        self.bn4 = torch.nn.BatchNorm2d(self.conv4.out_channels)
-
-        self.conv5 = torch.nn.Conv2d(self.conv4.out_channels, 256, kernel_size=2, stride=1, padding=1)
-        self.bn5 = torch.nn.BatchNorm2d(self.conv5.out_channels)
-
-        self.dropout_2d = torch.nn.Dropout2d(p=0.38)
-
-        self.block_1 = AggregationBlock(in_channels=self.conv2.out_channels)
-        self.block_2 = AggregationBlock(in_channels=self.conv4.out_channels)
+        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.blocks = self._make_layers(block_configs, dropout=0.2)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
-            x = self.forward_conv(dummy_input)
+            x = self.blocks(dummy_input)
+            x = self.max_pool(x)
             out_features = x.view(x.size(0), -1).size(1)
 
         print(f"Conv out features: {out_features}")
         self.fc = torch.nn.Linear(out_features, 10)
 
-    def forward_conv(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.dropout_2d(x)
-        x = self.max_pool(x)
-
-        x1 = self.conv2(x)
-        x1 = self.bn2(x1)
-        x1 = self.relu(x1)
-        x1 = self.dropout_2d(x1)
-        x1 = self.max_pool(x1)
-
-        x2 = self.conv3(x1)
-        x2 = self.bn3(x2)
-        x2 = self.relu(x2)
-        x2 = self.dropout_2d(x2)
-        x2 = self.max_pool(x2)
-
-        x = self.block_1.forward(x1, x2)
-
-        x3 = self.conv4(x)
-        x3 = self.bn4(x3)
-        x3 = self.relu(x3)
-        x3 = self.dropout_2d(x3)
-        x3 = self.max_pool(x3)
-
-        x4 = self.conv5(x3)
-        x4 = self.bn5(x4)
-        x4 = self.relu(x4)
-        x4 = self.dropout_2d(x4)
-        x4 = self.max_pool(x4)
-
-        x = self.block_2.forward(x3, x4)
-
-        return x
-
     def forward(self, x):
-        x = self.forward_conv(x)
+        x = self.blocks(x)
+        x = self.max_pool(x)
 
         x = torch.flatten(x, 1)
 
         x = self.fc(x)
 
         return x
+
+    @staticmethod
+    def _make_layers(block_configs, dropout=0.0):
+        layers = []
+        for in_channels, out_channels in block_configs:
+            layers.append(Block(in_channels, out_channels, dropout))
+
+        return nn.Sequential(*layers)
 
 
 train_batch_size = 128
@@ -202,13 +187,14 @@ lr = 1e-3
 weight_decay = 1e-1
 num_epochs = 300
 
-net = Net()
+net = Net(((3, 64), (64, 128), (128, 256), (256, 512)))
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
 
-scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader), epochs=num_epochs)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader),
+                                                epochs=num_epochs)
 
 print('LEARNING')
 writer = SummaryWriter()
@@ -264,7 +250,6 @@ for epoch in range(num_epochs):
           f'Train Accuracy: {train_accuracy:.2f}%, '
           f'Val Loss: {val_loss / len(val_loader):.4f}, '
           f'Val Accuracy: {val_accuracy:.2f}%')
-
 
 writer.flush()
 
