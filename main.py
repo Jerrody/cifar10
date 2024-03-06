@@ -99,25 +99,31 @@ class Block(torch.nn.Module):
 class Net(torch.nn.Module):
     def __init__(self,  block_configs: [(int, int)], input_size=(3, 32, 32)):
         super().__init__()
-        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.blocks = self._make_layers(block_configs, dropout=0.2)
+        # self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.blocks = self._make_layers(block_configs, dropout=0.3)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
             x = self.blocks(dummy_input)
-            x = self.max_pool(x)
+            # x = self.max_pool(x)
             out_features = x.view(x.size(0), -1).size(1)
 
         print(f"Conv out features: {out_features}")
-        self.fc = torch.nn.Linear(out_features, 10)
+        self.fc1 = nn.Linear(out_features, 512, bias=False)
+        self.bn1 = nn.BatchNorm1d(self.fc1.out_features)
+        self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
+        self.dropout = nn.Dropout(p=0.3)
 
     def forward(self, x):
         x = self.blocks(x)
-        x = self.max_pool(x)
 
         x = torch.flatten(x, 1)
 
-        x = self.fc(x)
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.dropout(x)
+
+        x = self.fc2(x)
 
         return x
 
