@@ -56,7 +56,7 @@ class Block(torch.nn.Module):
         self.dropout = None
         if dropout > 0.0:
             self.dropout = nn.Dropout2d(p=dropout)
-        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2)
 
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -97,7 +97,7 @@ class Block(torch.nn.Module):
 
 
 class Net(torch.nn.Module):
-    def __init__(self,  block_configs: [(int, int)], input_size=(3, 32, 32)):
+    def __init__(self, block_configs: [(int, int)], input_size=(3, 32, 32)):
         super().__init__()
         # self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.blocks = self._make_layers(block_configs, dropout=0.3)
@@ -112,7 +112,7 @@ class Net(torch.nn.Module):
         self.fc1 = nn.Linear(out_features, 512, bias=False)
         self.bn1 = nn.BatchNorm1d(self.fc1.out_features)
         self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
-        self.dropout = nn.Dropout(p=0.3)
+        self.dropout = nn.Dropout(p=0.5)
 
     def forward(self, x):
         x = self.blocks(x)
@@ -136,8 +136,8 @@ class Net(torch.nn.Module):
         return nn.Sequential(*layers)
 
 
-train_batch_size = 128
-test_batch_size = 64
+train_batch_size = 32
+test_batch_size = 16
 
 temp_transform = transforms.Compose([transforms.ToTensor()])
 
@@ -191,7 +191,7 @@ print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
 lr = 1e-3
 weight_decay = 1e-1
-num_epochs = 300
+num_epochs = 600
 
 net = Net(((3, 64), (64, 128), (128, 256), (256, 512)))
 net.to(device)
