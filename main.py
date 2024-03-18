@@ -16,6 +16,8 @@ is_folder_empty: bool = not os.listdir(dataset_path)
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print(f"Found device for fitting: {device}")
 
+PATH = './cifar_classifier.pth'
+
 
 def imshow(img):
     np_img = img.numpy()
@@ -56,7 +58,7 @@ class Block(torch.nn.Module):
         self.dropout = None
         if dropout > 0.0:
             self.dropout = nn.Dropout2d(p=dropout)
-        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2)
+        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -68,7 +70,8 @@ class Block(torch.nn.Module):
         if in_channels != out_channels:
             self.projection = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(out_channels)
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True)
             )
 
     def forward(self, x):
@@ -82,16 +85,16 @@ class Block(torch.nn.Module):
             out = self.dropout(out)
 
         if self.projection is not None:
-            residual = self.projection(x)
+            residual = self.projection(residual)
 
         if self.dropout is not None:
-            residual = self.projection(x)
+            residual = self.dropout(residual)
 
         out += residual
-        out = self.max_pool(out)
         out = F.relu(out)
         if self.dropout is not None:
             out = self.dropout(out)
+        out = self.max_pool(out)
 
         return out
 
@@ -100,7 +103,7 @@ class Net(torch.nn.Module):
     def __init__(self, block_configs: [(int, int)], input_size=(3, 32, 32)):
         super().__init__()
         # self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.blocks = self._make_layers(block_configs, dropout=0.3)
+        self.blocks = self._make_layers(block_configs, dropout=0.125)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
@@ -109,20 +112,19 @@ class Net(torch.nn.Module):
             out_features = x.view(x.size(0), -1).size(1)
 
         print(f"Conv out features: {out_features}")
-        self.fc1 = nn.Linear(out_features, 512, bias=False)
+        self.fc1 = nn.Linear(out_features, 128, bias=False)
         self.bn1 = nn.BatchNorm1d(self.fc1.out_features)
         self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
-        self.dropout = nn.Dropout(p=0.5)
+        # self.dropout = nn.Dropout(p=0.5)
 
     def forward(self, x):
         x = self.blocks(x)
 
         x = torch.flatten(x, 1)
 
+        # x = self.dropout(x)
         x = self.fc1(x)
         x = self.bn1(x)
-        x = self.dropout(x)
-
         x = self.fc2(x)
 
         return x
@@ -193,7 +195,7 @@ lr = 1e-3
 weight_decay = 1e-1
 num_epochs = 600
 
-net = Net(((3, 64), (64, 128), (128, 256), (256, 512)))
+net = Net(((3, 64), (64, 128), (128, 256)))
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
@@ -281,5 +283,17 @@ print(f'Test accuracy: {test_accuracy:.2f}%')
 dataiter = iter(test_loader)
 images, labels = next(dataiter)
 
-imshow(torchvision.utils.make_grid(images))
-print('GroundTruth: ', ' '.join(f'{classes[labels[j]]:5s}' for j in range(4)))
+imshow(torchvision.utils.make_grid(images, nrow=test_batch_size))
+print('GroundTruth: ', ' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
+
+torch.save(net.state_dict(), PATH)
+
+net = Net(((3, 64), (64, 128), (128, 256)))
+net.load_state_dict(torch.load(PATH))
+
+outputs = net(images)
+
+_, predicted = torch.max(outputs, 1)
+
+print('Predicted: ', ' '.join(f'{classes[predicted[j]]:5s}'
+                              for j in range(test_batch_size)))
