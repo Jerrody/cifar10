@@ -3,7 +3,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
@@ -53,89 +52,89 @@ def get_loader(is_train: bool, batch_size: int, shuffle: bool, transform: transf
 
 
 class Block(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, dropout=0.0):
+    def __init__(self, in_channels, out_channels, kernel_size=2, stride=1, padding=1):
         super(Block, self).__init__()
-        self.dropout = None
-        if dropout > 0.0:
-            self.dropout = nn.Dropout2d(p=dropout)
-        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.relu = nn.ReLU(inplace=True)
+        self.max_pool = nn.AvgPool2d(2, 2)
 
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv_input = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding,
+                                    bias=False)
+        self.bn_input = nn.BatchNorm2d(out_channels)
 
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.conv_output = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                     padding=padding, bias=False)
+        self.bn_output = nn.BatchNorm2d(out_channels)
 
-        self.projection = None
-        if in_channels != out_channels:
-            self.projection = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True)
-            )
+        self.projection = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
+
+    def forward(self, x, x_block):
+        x = self.conv_input(x)
+        x = self.bn_input(x)
+        x = self.relu(x)
+
+        x_input = x.clone()
+
+        x = self.conv_output(x)
+        x = self.bn_output(x)
+        x = self.relu(x)
+
+        _, _, height, weight = x.size()
+        x_input = nn.functional.interpolate(x_input, size=(height, weight), mode='bilinear', align_corners=False)
+        if x_block is None:
+            output = x + x_input
+        else:
+            x_block = nn.functional.interpolate(x_block, size=(height, weight), mode='bilinear', align_corners=False)
+            x_block = self.projection(x_block)
+            x_block = self.bn_output(x_block)
+            x_block = self.relu(x_block)
+
+            output = x + x_input + x_block
+
+        return self.max_pool(output)
+
+
+class Sequence(torch.nn.Module):
+    def __init__(self, block_configs: [(int, int)]):
+        super(Sequence, self).__init__()
+        self.blocks = nn.ModuleList()
+        for block_config in block_configs:
+            block = Block(*block_config)
+            self.blocks.append(block)
 
     def forward(self, x):
-        residual = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        if self.dropout is not None:
-            out = self.dropout(out)
+        block_output = None
+        for block in self.blocks:
+            if block_output is None:
+                block_output = block(x, block_output)
+            else:
+                block_output = block(block_output, block_output)
 
-        out = F.relu(self.bn2(self.conv2(out))).clone()
-        if self.dropout is not None:
-            out = self.dropout(out)
-
-        if self.projection is not None:
-            residual = self.projection(residual)
-
-        if self.dropout is not None:
-            residual = self.dropout(residual)
-
-        out += residual
-        out = F.relu(out)
-        if self.dropout is not None:
-            out = self.dropout(out)
-        out = self.max_pool(out)
-
-        return out
+        return block_output
 
 
 class Net(torch.nn.Module):
     def __init__(self, block_configs: [(int, int)], input_size=(3, 32, 32)):
         super().__init__()
-        # self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.blocks = self._make_layers(block_configs, dropout=0.125)
+        self.sequence = Sequence(block_configs)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
-            x = self.blocks(dummy_input)
-            # x = self.max_pool(x)
+            x = self.sequence(dummy_input)
             out_features = x.view(x.size(0), -1).size(1)
 
         print(f"Conv out features: {out_features}")
-        self.fc1 = nn.Linear(out_features, 128, bias=False)
-        self.bn1 = nn.BatchNorm1d(self.fc1.out_features)
-        self.fc2 = torch.nn.Linear(self.fc1.out_features, 10)
-        # self.dropout = nn.Dropout(p=0.5)
+        self.fc1 = nn.Linear(out_features, 10)
+        self.dropout = nn.Dropout(0.5)
 
     def forward(self, x):
-        x = self.blocks(x)
+        x = self.sequence(x)
 
         x = torch.flatten(x, 1)
 
-        # x = self.dropout(x)
+        x = self.dropout(x)
         x = self.fc1(x)
-        x = self.bn1(x)
-        x = self.fc2(x)
 
         return x
-
-    @staticmethod
-    def _make_layers(block_configs, dropout=0.0):
-        layers = []
-        for in_channels, out_channels in block_configs:
-            layers.append(Block(in_channels, out_channels, dropout))
-
-        return nn.Sequential(*layers)
 
 
 train_batch_size = 32
@@ -193,9 +192,9 @@ print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
 lr = 1e-3
 weight_decay = 1e-1
-num_epochs = 600
+num_epochs = 50
 
-net = Net(((3, 64), (64, 128), (128, 256)))
+net = Net(((3, 64), (64, 128)))
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
@@ -288,7 +287,7 @@ print('GroundTruth: ', ' '.join(f'{classes[labels[j]]:5s}' for j in range(test_b
 
 torch.save(net.state_dict(), PATH)
 
-net = Net(((3, 64), (64, 128), (128, 256)))
+net = Net([(3, 64), (64, 128), (128, 256)])
 net.load_state_dict(torch.load(PATH))
 
 outputs = net(images)
