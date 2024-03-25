@@ -54,8 +54,9 @@ def get_loader(is_train: bool, batch_size: int, shuffle: bool, transform: transf
 class Block(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=2, stride=1, padding=1):
         super(Block, self).__init__()
+        self.dropout = nn.Dropout2d(0.3)
         self.relu = nn.ReLU(inplace=True)
-        self.max_pool = nn.AvgPool2d(2, 2)
+        self.max_pool = nn.MaxPool2d(3, 2)
 
         self.conv_input = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding,
                                     bias=False)
@@ -71,12 +72,14 @@ class Block(torch.nn.Module):
         x = self.conv_input(x)
         x = self.bn_input(x)
         x = self.relu(x)
+        x = self.dropout(x)
 
         x_input = x.clone()
 
         x = self.conv_output(x)
         x = self.bn_output(x)
         x = self.relu(x)
+        x = self.dropout(x)
 
         _, _, height, weight = x.size()
         x_input = nn.functional.interpolate(x_input, size=(height, weight), mode='bilinear', align_corners=False)
@@ -87,6 +90,7 @@ class Block(torch.nn.Module):
             x_block = self.projection(x_block)
             x_block = self.bn_output(x_block)
             x_block = self.relu(x_block)
+            x_block = self.dropout(x_block)
 
             output = x + x_input + x_block
 
@@ -116,18 +120,22 @@ class Net(torch.nn.Module):
     def __init__(self, block_configs: [(int, int)], input_size=(3, 32, 32)):
         super().__init__()
         self.sequence = Sequence(block_configs)
+        self.max_pool = nn.MaxPool2d(3, 1)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
             x = self.sequence(dummy_input)
+            x = self.max_pool(x)
             out_features = x.view(x.size(0), -1).size(1)
 
         print(f"Conv out features: {out_features}")
-        self.fc1 = nn.Linear(out_features, 10)
-        self.dropout = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(out_features,  10)
+
+        self.dropout = nn.Dropout(0.3)
 
     def forward(self, x):
         x = self.sequence(x)
+        x = self.max_pool(x)
 
         x = torch.flatten(x, 1)
 
@@ -192,7 +200,7 @@ print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
 lr = 1e-3
 weight_decay = 1e-1
-num_epochs = 50
+num_epochs = 500
 
 net = Net(((3, 64), (64, 128)))
 net.to(device)
