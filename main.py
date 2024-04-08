@@ -54,9 +54,10 @@ def get_loader(is_train: bool, batch_size: int, shuffle: bool, transform: transf
 class Block(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=2, stride=1, padding=1):
         super(Block, self).__init__()
-        self.dropout = nn.Dropout2d(0.3)
+        self.dropout = nn.Dropout2d(0.2)
         self.relu = nn.ReLU(inplace=True)
         self.max_pool = nn.MaxPool2d(3, 2)
+        self.soft_attention = SoftAttention(out_channels)
 
         self.conv_input = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding,
                                     bias=False)
@@ -94,7 +95,10 @@ class Block(torch.nn.Module):
 
             output = x + x_input + x_block
 
-        return self.max_pool(output)
+        output = self.max_pool(output)
+        output = self.soft_attention(output)
+
+        return output
 
 
 class Sequence(torch.nn.Module):
@@ -116,22 +120,39 @@ class Sequence(torch.nn.Module):
         return block_output
 
 
+class SoftAttention(nn.Module):
+    def __init__(self, in_channels, reduction=1):
+        super(SoftAttention, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels=in_channels // reduction, kernel_size=1)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(in_channels // reduction, out_channels=1, kernel_size=1)
+
+    def forward(self, x):
+        attention = self.conv1(x)
+        attention = self.relu(attention)
+        attention = self.conv2(attention)
+        attention = torch.sigmoid(attention)
+        return x * attention
+
+
 class Net(torch.nn.Module):
     def __init__(self, block_configs: [(int, int)], input_size=(3, 32, 32)):
         super().__init__()
         self.sequence = Sequence(block_configs)
         self.max_pool = nn.MaxPool2d(3, 1)
+        self.soft_attention = SoftAttention(32)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
             x = self.sequence(dummy_input)
             x = self.max_pool(x)
+
             out_features = x.view(x.size(0), -1).size(1)
 
         print(f"Conv out features: {out_features}")
         self.fc1 = nn.Linear(out_features,  10)
 
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(0.0)
 
     def forward(self, x):
         x = self.sequence(x)
@@ -145,8 +166,8 @@ class Net(torch.nn.Module):
         return x
 
 
-train_batch_size = 32
-test_batch_size = 16
+train_batch_size = 16
+test_batch_size = 8
 
 temp_transform = transforms.Compose([transforms.ToTensor()])
 
@@ -202,14 +223,15 @@ lr = 1e-3
 weight_decay = 1e-1
 num_epochs = 500
 
-net = Net(((3, 64), (64, 128)))
+net = Net(((3, 8), (8, 16), (16, 32)))
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
 
-scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader),
-                                                epochs=num_epochs)
+# scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader),
+#                                                 epochs=num_epochs)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2, verbose=True)
 
 print('LEARNING')
 writer = SummaryWriter()
@@ -229,7 +251,7 @@ for epoch in range(num_epochs):
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-        scheduler.step()
+        # scheduler.step()
 
         running_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
@@ -265,6 +287,7 @@ for epoch in range(num_epochs):
           f'Train Accuracy: {train_accuracy:.2f}%, '
           f'Val Loss: {val_loss / len(val_loader):.4f}, '
           f'Val Accuracy: {val_accuracy:.2f}%')
+    scheduler.step(val_loss)
 
 writer.flush()
 
