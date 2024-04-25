@@ -56,7 +56,7 @@ class Block(torch.nn.Module):
         super(Block, self).__init__()
         self.dropout = nn.Dropout2d(0.2)
         self.relu = nn.ReLU(inplace=True)
-        self.max_pool = nn.MaxPool2d(3, 2)
+        self.max_pool = nn.MaxPool2d(2, 2)
         self.soft_attention = SoftAttention(out_channels)
 
         self.conv_input = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding,
@@ -140,23 +140,23 @@ class Net(torch.nn.Module):
         super().__init__()
         self.sequence = Sequence(block_configs)
         self.max_pool = nn.MaxPool2d(3, 1)
-        self.soft_attention = SoftAttention(32)
+        self.soft_attention = SoftAttention(128)
 
         with torch.no_grad():
             dummy_input = torch.zeros(1, *input_size)
             x = self.sequence(dummy_input)
-            x = self.max_pool(x)
+            # x = self.max_pool(x)
 
             out_features = x.view(x.size(0), -1).size(1)
 
         print(f"Conv out features: {out_features}")
         self.fc1 = nn.Linear(out_features,  10)
 
-        self.dropout = nn.Dropout(0.0)
+        self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         x = self.sequence(x)
-        x = self.max_pool(x)
+        # x = self.max_pool(x)
 
         x = torch.flatten(x, 1)
 
@@ -220,18 +220,18 @@ imshow(torchvision.utils.make_grid(images))
 print(' '.join(f'{classes[labels[j]]:5s}' for j in range(test_batch_size)))
 
 lr = 1e-3
-weight_decay = 1e-1
-num_epochs = 500
+weight_decay = 1e-2
+num_epochs = 120
 
-net = Net(((3, 8), (8, 16), (16, 32)))
+net = Net(((3, 32), (32, 42), (42, 56)))
 net.to(device)
 
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
 
-# scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader),
-#                                                 epochs=num_epochs)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2, verbose=True)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(train_loader),
+                                                epochs=num_epochs)
+# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=4, verbose=True)
 
 print('LEARNING')
 writer = SummaryWriter()
@@ -251,7 +251,7 @@ for epoch in range(num_epochs):
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-        # scheduler.step()
+        scheduler.step()
 
         running_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
@@ -287,7 +287,7 @@ for epoch in range(num_epochs):
           f'Train Accuracy: {train_accuracy:.2f}%, '
           f'Val Loss: {val_loss / len(val_loader):.4f}, '
           f'Val Accuracy: {val_accuracy:.2f}%')
-    scheduler.step(val_loss)
+    # scheduler.step(val_loss)
 
 writer.flush()
 
